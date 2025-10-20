@@ -1,0 +1,5 @@
+prefect
+google-cloud-storage
+pandas
+requests
+pyarrow

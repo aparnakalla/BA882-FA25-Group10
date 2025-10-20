@@ -1,0 +1,19 @@
+# prefect.yaml — Deployment configuration for MBTA Routes Flow
+
+name: mbta-pipeline
+prefect-version: 3.0.0
+
+# 👇 location of your flow script
+workpool: mbta-workpool
+flows:
+  - name: MBTA-Routes-Hourly
+    entrypoint: flows/mbta_routes_flow.py:mbta_routes_flow
+    description: "Fetch MBTA routes via v3 API and upload to GCS every hour."
+    schedule:
+      interval: 3600  # every 1 hour (in seconds)
+    storage:
+      block_type_slug: gcs
+      bucket_path: ba882-team10-bucket/flows
+      project: christina-ba882-fall25
+      service_account_file: /home/kalla/BA882-FA25-Group10/christina-ba882-fall25-d5136a973995.json
+      credentials_block_name: gcs-storage-credentials
