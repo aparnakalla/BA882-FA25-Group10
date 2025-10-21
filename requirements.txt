@@ -3,3 +3,5 @@ google-cloud-storage
 pandas
 requests
 pyarrow
+streamlit
+google-cloud-bigquery
