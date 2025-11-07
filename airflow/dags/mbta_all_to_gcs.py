@@ -6,6 +6,7 @@ import pendulum
 from airflow.decorators import dag, task
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.operators.python import get_current_context
+from airflow.timetables.trigger import CronTriggerTimetable
 
 API_BASE   = "https://api-v3.mbta.com"
 BUCKET     = "ba882-team10-bucket"
@@ -22,12 +23,11 @@ ENDPOINTS = [
 
 @dag(
     dag_id="mbta_all_to_gcs",
-    schedule=SCHEDULE,
+    timetable=CronTriggerTimetable(SCHEDULE, timezone=pendulum.timezone(TIMEZONE)),
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    timezone=TIMEZONE,
     catchup=False,
     max_active_runs=1,
-    default_args={"owner":"data-eng","retries":2,"retry_delay":timedelta(minutes=5)},
+    default_args={"owner": "data-eng", "retries": 2, "retry_delay": timedelta(minutes=5)},
     tags=["mbta","gcs","snapshots"],
 )
 def mbta_all_to_gcs():
