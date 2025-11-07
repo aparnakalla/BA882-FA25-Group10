@@ -13,7 +13,7 @@ BUCKET     = "ba882-team10-bucket"
 GCP_CONN   = "google_cloud_default"
 PREFIX     = "mbta-dataset"                # we'll create subfolders per endpoint
 TIMEZONE   = "America/New_York"
-SCHEDULE   = "0 1 * * 6"                   # Sat 1:00am
+SCHEDULE   = "0 6 * * 6"                   # Sat 1:00am
 API_KEY    = "4e3c51157a42404394aed06ee9a548bb"
 
 ENDPOINTS = [
@@ -23,7 +23,7 @@ ENDPOINTS = [
 
 @dag(
     dag_id="mbta_all_to_gcs",
-    timetable=CronTriggerTimetable(SCHEDULE, timezone=pendulum.timezone(TIMEZONE)),
+    schedule=SCHEDULE,
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
     catchup=False,
     max_active_runs=1,
