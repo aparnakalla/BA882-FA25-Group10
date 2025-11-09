@@ -37,7 +37,7 @@ def mbta_all_to_gcs():
         ctx = get_current_context()
         return {"ds_nodash": ctx["ds_nodash"]}
 
-    @task.map
+    @task
     def fetch_and_upload(endpoint: str, run_info: dict):
         # Fetch
         url = f"{API_BASE.rstrip('/')}/{endpoint}"
