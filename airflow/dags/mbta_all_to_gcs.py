@@ -50,12 +50,10 @@ ENDPOINTS = [
     "alerts",
     "facilities",
     "lines",
-    "live_facilities",
     "predictions",       # needs filters
     "routes",
     "route_patterns",
     "schedules",         # needs filters
-    "services",
     "shapes",            # needs filters
     "stops",
     "trips",             # needs filters
