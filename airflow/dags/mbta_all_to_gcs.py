@@ -10,6 +10,7 @@ import requests
 
 from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 
@@ -159,22 +160,34 @@ def mbta_all_to_gcs():
 
     run_info = build_run_info()
 
+    fetch_tasks = []
     for ep in ENDPOINTS:
         t = make_fetch_task(ep)
-        t(run_info)
+        fetch_tasks.append(t(run_info))
+
+    # After all fetches finish, trigger the external tables DAG
+    trigger_ext = TriggerDagRunOperator(
+        task_id="trigger_mbta_bq_external_tables",
+        trigger_dag_id="mbta_bq_external_tables",
+        wait_for_completion=False,
+    )
+
+    # Set dependencies: all fetch tasks must complete before trigger
+    for ft in fetch_tasks:
+        ft >> trigger_ext
 
 
 mbta_all_to_gcs_dag = mbta_all_to_gcs()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DAG 2: CREATE/REFRESH BIGQUERY EXTERNAL TABLES ON RAW GCS SNAPSHOTS
+# DAG 2: CREATE/REFRESH BIGQUERY EXTERNAL TABLES, THEN TRIGGER BACKFILL
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dag(
     dag_id="mbta_bq_external_tables",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # run manually when schemas/paths change
+    schedule=None,  # auto-run via TriggerDagRunOperator
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "bigquery", "external"],
@@ -185,10 +198,10 @@ def mbta_bq_external_tables():
 
       data_from_gcs_to_bq.<endpoint>_ext
 
-    Sources:
-      gs://BUCKET_NAME/mbta-dataset/<endpoint>/*.json
-      gs://BUCKET_NAME/mbta-dataset/<endpoint>/route=*/*.json
+    Then trigger the native backfill DAG.
     """
+
+    create_tasks = []
 
     for ep in ENDPOINTS:
         if ep in FILTERED_ENDPOINTS:
@@ -198,7 +211,7 @@ def mbta_bq_external_tables():
 
         table_id = f"{PROJECT_ID}.{BQ_DATASET}.{ep}_ext"
 
-        BigQueryInsertJobOperator(
+        t = BigQueryInsertJobOperator(
             task_id=f"create_ext_{ep}",
             configuration={
                 "query": {
@@ -214,6 +227,16 @@ def mbta_bq_external_tables():
                 }
             },
         )
+        create_tasks.append(t)
+
+    trigger_cf_dag = TriggerDagRunOperator(
+        task_id="trigger_mbta_cf_backfill_native",
+        trigger_dag_id="mbta_cf_backfill_native",
+        wait_for_completion=False,
+    )
+
+    for ct in create_tasks:
+        ct >> trigger_cf_dag
 
 
 mbta_bq_external_tables_dag = mbta_bq_external_tables()
@@ -226,7 +249,7 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
 @dag(
     dag_id="mbta_cf_backfill_native",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # on-demand backfill / rebuild
+    schedule=None,  # auto-run via TriggerDagRunOperator
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "cloud-function", "bigquery", "native"],
