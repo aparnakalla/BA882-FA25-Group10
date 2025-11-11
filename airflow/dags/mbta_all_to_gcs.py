@@ -62,7 +62,6 @@ GCP_CONN = "google_cloud_default"
 TIMEZONE = "America/New_York"
 API_KEY = os.environ.get("MBTA_API_KEY") or "4e3c51157a42404394aed06ee9a548bb"
 
-# Cloud Function HTTP backfill URL
 CF_BACKFILL_URL = os.environ.get(
     "MBTA_CF_BACKFILL_URL",
     "https://us-central1-christina-ba882-fall25.cloudfunctions.net/http_gcs_to_bq",
@@ -178,34 +177,30 @@ mbta_all_to_gcs_dag = mbta_all_to_gcs()
 @dag(
     dag_id="mbta_bq_external_tables",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # triggered by mbta_all_to_gcs
+    schedule=None,
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "bigquery", "external"],
 )
 def mbta_bq_external_tables():
-    """One external table per MBTA endpoint: dataset.<endpoint>_ext"""
+    """Create or refresh BigQuery external tables for all MBTA endpoints."""
 
     create_tasks = []
 
     for ep in ENDPOINTS:
-        # Build the list of URIs explicitly
+        # ✅ FIX: only one wildcard; supports nested route folders
         if ep in FILTERED_ENDPOINTS:
-            uris = [
-                f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/route={route_id}/*.json"
-                for route_id in ROUTES_OF_INTEREST
-            ]
+            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*"
         else:
-            uris = [f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"]
+            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"
 
-        uris_literal = ", ".join(f"'{u}'" for u in uris)
         table_id = f"{PROJECT_ID}.{BQ_DATASET}.{ep}_ext"
 
         query = f"""
             CREATE OR REPLACE EXTERNAL TABLE `{table_id}`
             OPTIONS (
               format = 'NEWLINE_DELIMITED_JSON',
-              uris = [{uris_literal}]
+              uris = ['{source_uri}']
             )
         """
 
@@ -239,7 +234,7 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
 @dag(
     dag_id="mbta_cf_backfill_native",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # triggered by mbta_bq_external_tables
+    schedule=None,
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "cloud-function", "bigquery", "native"],
@@ -250,32 +245,25 @@ def mbta_cf_backfill_native():
     @task(task_id="trigger_load_all_existing_from_gcs")
     def trigger_cf():
         if not CF_BACKFILL_URL or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL:
-            raise ValueError(
-                "MBTA_CF_BACKFILL_URL is not set to a valid Cloud Function URL."
-            )
+            raise ValueError("MBTA_CF_BACKFILL_URL is not set correctly.")
 
         try:
             resp = requests.get(CF_BACKFILL_URL, timeout=300)
-            print("Cloud Function status code:", resp.status_code)
-            print("Cloud Function response text:", resp.text)
+            print("Cloud Function status:", resp.status_code)
+            print("Response:", resp.text)
 
             try:
                 resp.raise_for_status()
             except HTTPError as e:
                 if e.response is not None and e.response.status_code == 504:
-                    print(
-                        "⚠️ Cloud Function returned 504 Gateway Timeout "
-                        "(upstream request timeout). Treating as non-fatal."
-                    )
+                    print("⚠️ 504 timeout — non-fatal, check CF logs.")
                     return f"504 from CF: {e.response.text}"
                 raise
 
             return resp.text
 
         except ReadTimeout:
-            print(
-                "⚠️ Cloud Function call timed out after 300s; treating as success."
-            )
+            print("⚠️ Cloud Function call timed out after 300s; treating as success.")
             return "Timed out waiting for Cloud Function."
 
     trigger_cf()
