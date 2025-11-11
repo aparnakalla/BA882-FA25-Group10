@@ -22,10 +22,22 @@ bq_client = bigquery.Client(project=PROJECT_ID)
 def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[Dict[str, Any]]:
     """
     MBTA v3 responses are shaped like:
-      { "data": [ { "id": "...", "type": "...", "attributes": {...}, "relationships": {...} }, ... ] }
+      {
+        "data": [
+          {
+            "id": "...",
+            "type": "...",
+            "attributes": {...},
+            "relationships": {...}
+          },
+          ...
+        ]
+      }
 
-    We extract attributes and add useful ids. Also add route=... from the path if present.
-    IMPORTANT: Any list/dict values are JSON-serialized so they fit into STRING columns in BigQuery.
+    We extract attributes and relationship ids into a flat dict.
+    IMPORTANT:
+      - Any list/dict attribute values are JSON-serialized so they can go into STRING fields.
+      - route_hint (from GCS path) is added as 'route_hint' column if present.
     """
     data = obj.get("data", [])
     out: List[Dict[str, Any]] = []
@@ -71,7 +83,10 @@ def _infer_table_from_path(gcs_name: str) -> (str, Optional[str]):
     Expect paths like:
       mbta-dataset/routes/routes_20251109.json
       mbta-dataset/predictions/route=Red/predictions_20251109.json
-    Returns (table_name, route_hint_or_none)
+
+    Returns:
+      table_name (e.g. "routes", "predictions", ...)
+      route_hint (e.g. "Red") or None
     """
     parts = gcs_name.split("/")
     if len(parts) < 2:
@@ -91,17 +106,18 @@ def _insert_rows(table_id: str, rows: List[Dict[str, Any]]) -> int:
     """
     Stream JSON rows into BigQuery.
 
-    IMPORTANT: We LOG errors instead of raising, so one bad row
-    does not crash the entire Cloud Function / Airflow DAG.
+    IMPORTANT:
+      - We LOG insert errors instead of raising, so a few bad rows
+        do not crash the entire Cloud Function / Airflow DAG.
     """
     if not rows:
         return 0
 
     errors = bq_client.insert_rows_json(table_id, rows)
     if errors:
-        # Log the errors but don't crash the function
+        # Log some errors but don't crash
         print(f"BigQuery insert errors for {table_id}: {errors[:3]}")
-        # Count how many rows failed (best-effort)
+        # Best-effort count of successes vs failures
         failed_indices = {e.get("index") for e in errors if "index" in e}
         successful = len(rows) - len(failed_indices)
         print(f"{successful} rows succeeded, {len(failed_indices)} rows failed for {table_id}")
@@ -157,16 +173,17 @@ def http_gcs_to_bq(request):
 
     Modes:
 
-    1) Bulk mode (your current Airflow DAG):
+    1) Bulk mode (what your Airflow DAG uses now):
        - Airflow sends a simple GET with no body.
        - We use BUCKET_NAME and PREFIX env vars (or defaults) and
          scan all *.json files under that prefix.
 
-    2) Single-object mode (optional):
-       - Request body JSON: { "bucket": "...", "name": "mbta-dataset/routes/routes_20251109.json" }
-       - Processes just that one file.
-
-    Accepts GET and POST.
+    2) Single-object mode (optional for future use):
+       - Request body JSON:
+           {
+             "bucket": "...",
+             "name": "mbta-dataset/routes/routes_20251109.json"
+           }
     """
     try:
         # Allow both GET and POST
