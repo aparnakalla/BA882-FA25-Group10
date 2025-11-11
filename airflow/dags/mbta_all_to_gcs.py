@@ -10,7 +10,7 @@ import requests
 
 from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
-from airflow.operators.trigger_dagrun import TriggerDagRunOperator
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 
@@ -64,7 +64,7 @@ API_KEY = os.environ.get("MBTA_API_KEY") or "4e3c51157a42404394aed06ee9a548bb"
 # Cloud Function HTTP backfill URL (set this in Astro/Env)
 CF_BACKFILL_URL = os.environ.get(
     "MBTA_CF_BACKFILL_URL",
-    "https://YOUR_CLOUD_FUNCTION_URL/load_all_existing_from_gcs",
+    "https://us-central1-christina-ba882-fall25.cloudfunctions.net/http_gcs_to_bq",
 )
 
 
@@ -165,14 +165,13 @@ def mbta_all_to_gcs():
         t = make_fetch_task(ep)
         fetch_tasks.append(t(run_info))
 
-    # After all fetches finish, trigger the external tables DAG
+    # After all fetch tasks finish, trigger external tables DAG
     trigger_ext = TriggerDagRunOperator(
         task_id="trigger_mbta_bq_external_tables",
         trigger_dag_id="mbta_bq_external_tables",
         wait_for_completion=False,
     )
 
-    # Set dependencies: all fetch tasks must complete before trigger
     for ft in fetch_tasks:
         ft >> trigger_ext
 
@@ -187,7 +186,7 @@ mbta_all_to_gcs_dag = mbta_all_to_gcs()
 @dag(
     dag_id="mbta_bq_external_tables",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # auto-run via TriggerDagRunOperator
+    schedule=None,  # triggered by mbta_all_to_gcs
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "bigquery", "external"],
@@ -219,8 +218,7 @@ def mbta_bq_external_tables():
                         CREATE OR REPLACE EXTERNAL TABLE `{table_id}`
                         OPTIONS (
                           format = 'NEWLINE_DELIMITED_JSON',
-                          uris = ['{source_uri}'],
-                          autodetect = TRUE
+                          uris = ['{source_uri}']
                         )
                     """,
                     "useLegacySql": False,
@@ -249,7 +247,7 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
 @dag(
     dag_id="mbta_cf_backfill_native",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # auto-run via TriggerDagRunOperator
+    schedule=None,  # triggered by mbta_bq_external_tables
     catchup=False,
     max_active_runs=1,
     tags=["mbta", "cloud-function", "bigquery", "native"],
@@ -264,8 +262,15 @@ def mbta_cf_backfill_native():
 
     @task(task_id="trigger_load_all_existing_from_gcs")
     def trigger_cf():
-        if not CF_BACKFILL_URL:
-            raise ValueError("MBTA_CF_BACKFILL_URL environment variable is not set")
+        # Fail fast with a clear message if URL is not configured
+        if (
+            not CF_BACKFILL_URL
+            or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL
+        ):
+            raise ValueError(
+                "MBTA_CF_BACKFILL_URL is not set to a valid Cloud Function URL. "
+                "Configure it in your deployment environment."
+            )
 
         resp = requests.get(CF_BACKFILL_URL, timeout=60)
         resp.raise_for_status()
