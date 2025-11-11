@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 
 import pendulum
 import requests
-from requests import ReadTimeout
+from requests import ReadTimeout, HTTPError
 
 from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
@@ -271,18 +271,33 @@ def mbta_cf_backfill_native():
             )
 
         try:
-            # ⬇⬇⬇ increase timeout & handle timeouts gracefully
+            # Give the CF up to 300 seconds
             resp = requests.get(CF_BACKFILL_URL, timeout=300)
             print("Cloud Function status code:", resp.status_code)
             print("Cloud Function response text:", resp.text)
-            resp.raise_for_status()
+
+            # Handle HTTP status codes explicitly
+            try:
+                resp.raise_for_status()
+            except HTTPError as e:
+                # If Cloud Function gateway returns 504, treat as "best-effort success"
+                if e.response is not None and e.response.status_code == 504:
+                    print(
+                        "⚠️ Cloud Function returned 504 Gateway Timeout "
+                        "(upstream request timeout). Treating as non-fatal. "
+                        "Check CF logs for how much work was done."
+                    )
+                    return f"504 from CF: {e.response.text}"
+                # For any other HTTP error, re-raise and fail the task
+                raise
+
             return resp.text
 
         except ReadTimeout:
-            # Do NOT fail the task on timeout; CF may still be running in background
+            # Do NOT fail the task on client-side timeout; CF may still be running or already finished
             print(
-                "⚠️ Cloud Function call timed out after 300s; "
-                "treating as success. Check CF logs for full progress."
+                "⚠️ Cloud Function call timed out on the client side after 300s; "
+                "treating as success. Check CF logs for completion details."
             )
             return "Timed out waiting for Cloud Function, but continuing."
 
@@ -290,4 +305,3 @@ def mbta_cf_backfill_native():
 
 
 mbta_cf_backfill_native_dag = mbta_cf_backfill_native()
-
