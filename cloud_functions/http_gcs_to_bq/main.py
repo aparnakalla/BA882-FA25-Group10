@@ -23,8 +23,9 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
     """
     MBTA v3 responses are shaped like:
       { "data": [ { "id": "...", "type": "...", "attributes": {...}, "relationships": {...} }, ... ] }
+
     We extract attributes and add useful ids. Also add route=... from the path if present.
-    Returns a list of flat dicts suitable for BigQuery JSON ingestion.
+    IMPORTANT: Any list/dict values are JSON-serialized so they fit into STRING columns in BigQuery.
     """
     data = obj.get("data", [])
     out: List[Dict[str, Any]] = []
@@ -37,7 +38,11 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
         # attributes
         attrs = item.get("attributes", {}) or {}
         for k, v in attrs.items():
-            rec[k] = v
+            # Convert complex types (list/dict) to JSON strings so they can be stored in STRING fields
+            if isinstance(v, (dict, list)):
+                rec[k] = json.dumps(v)
+            else:
+                rec[k] = v
 
         # relationships (pluck obvious ids if present)
         rels = item.get("relationships", {}) or {}
@@ -202,3 +207,4 @@ def http_gcs_to_bq(request):
             500,
             {"Content-Type": "application/json"},
         )
+
