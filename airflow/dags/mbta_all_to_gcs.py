@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import timedelta
-from typing import Dict, Any, List
+from typing import Any, Dict, List
 
 import pendulum
 import requests
@@ -12,7 +12,6 @@ from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
-from airflow.providers.http.operators.http import SimpleHttpOperator
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL CONFIG
@@ -61,9 +60,11 @@ GCP_CONN = "google_cloud_default"
 TIMEZONE = "America/New_York"
 API_KEY = os.environ.get("MBTA_API_KEY") or "4e3c51157a42404394aed06ee9a548bb"
 
-# Cloud Function HTTP backfill endpoint
-HTTP_CONN_ID = "mbta_cf_http"
-CF_BACKFILL_PATH = "/load_all_existing_from_gcs"
+# Cloud Function HTTP backfill URL (set this in Astro/Env)
+CF_BACKFILL_URL = os.environ.get(
+    "MBTA_CF_BACKFILL_URL",
+    "https://YOUR_CLOUD_FUNCTION_URL/load_all_existing_from_gcs",
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,7 +135,7 @@ def mbta_all_to_gcs():
                 return uris
 
             # non-filtered endpoints
-            params = {}
+            params: Dict[str, Any] = {}
             if API_KEY:
                 params["api_key"] = API_KEY
 
@@ -238,13 +239,16 @@ def mbta_cf_backfill_native():
     and upsert/insert into native flattened tables in BigQuery.
     """
 
-    SimpleHttpOperator(
-        task_id="trigger_load_all_existing_from_gcs",
-        http_conn_id=HTTP_CONN_ID,
-        endpoint=CF_BACKFILL_PATH.lstrip("/"),
-        method="GET",
-        log_response=True,
-    )
+    @task(task_id="trigger_load_all_existing_from_gcs")
+    def trigger_cf():
+        if not CF_BACKFILL_URL:
+            raise ValueError("MBTA_CF_BACKFILL_URL environment variable is not set")
+
+        resp = requests.get(CF_BACKFILL_URL, timeout=60)
+        resp.raise_for_status()
+        return resp.text
+
+    trigger_cf()
 
 
 mbta_cf_backfill_native_dag = mbta_cf_backfill_native()
