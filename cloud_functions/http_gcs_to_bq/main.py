@@ -90,14 +90,23 @@ def _infer_table_from_path(gcs_name: str) -> (str, Optional[str]):
 def _insert_rows(table_id: str, rows: List[Dict[str, Any]]) -> int:
     """
     Stream JSON rows into BigQuery.
+
+    IMPORTANT: We LOG errors instead of raising, so one bad row
+    does not crash the entire Cloud Function / Airflow DAG.
     """
     if not rows:
         return 0
 
     errors = bq_client.insert_rows_json(table_id, rows)
     if errors:
-        # Log only a subset of errors for brevity
-        raise RuntimeError(f"BigQuery insert errors: {errors[:3]}")
+        # Log the errors but don't crash the function
+        print(f"BigQuery insert errors for {table_id}: {errors[:3]}")
+        # Count how many rows failed (best-effort)
+        failed_indices = {e.get("index") for e in errors if "index" in e}
+        successful = len(rows) - len(failed_indices)
+        print(f"{successful} rows succeeded, {len(failed_indices)} rows failed for {table_id}")
+        return successful
+
     return len(rows)
 
 
