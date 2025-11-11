@@ -11,14 +11,15 @@ import requests
 from airflow.decorators import dag, task
 from airflow.operators.python import get_current_context
 from airflow.providers.google.cloud.hooks.gcs import GCSHook
-from airflow.providers.google.cloud.operators.bigquery import BigQueryCreateExternalTableOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 from airflow.providers.http.operators.http import SimpleHttpOperator
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GLOBAL CONFIG (shared by all DAGs)
+# GLOBAL CONFIG
 # ─────────────────────────────────────────────────────────────────────────────
 
 API_BASE = "https://api-v3.mbta.com"
+
 ROUTES_OF_INTEREST = [
     # Subway
     "Red", "Orange", "Blue",
@@ -60,9 +61,9 @@ GCP_CONN = "google_cloud_default"
 TIMEZONE = "America/New_York"
 API_KEY = os.environ.get("MBTA_API_KEY") or "4e3c51157a42404394aed06ee9a548bb"
 
-# Cloud Function HTTP backfill endpoint (configure matching your deployment)
-HTTP_CONN_ID = "mbta_cf_http"          # Airflow HTTP connection id
-CF_BACKFILL_PATH = "/load_all_existing_from_gcs"  # path of your HTTP CF
+# Cloud Function HTTP backfill endpoint
+HTTP_CONN_ID = "mbta_cf_http"
+CF_BACKFILL_PATH = "/load_all_existing_from_gcs"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,13 +88,13 @@ def mbta_all_to_gcs():
     Weekly snapshot of multiple MBTA endpoints into GCS.
 
     For endpoints that require filters (predictions, schedules, shapes, trips),
-    we iterate over ROUTES_OF_INTEREST and write one JSON file per route.
+    iterate over ROUTES_OF_INTEREST and write one JSON file per route.
     """
 
     @task
     def build_run_info() -> dict:
         ctx = get_current_context()
-        return {"ds_nodash": ctx["ds_nodash"]}  # e.g. 20251109
+        return {"ds_nodash": ctx["ds_nodash"]}
 
     def make_fetch_task(endpoint: str):
         @task(task_id=f"fetch_and_upload_{endpoint}")
@@ -183,30 +184,33 @@ def mbta_bq_external_tables():
 
       data_from_gcs_to_bq.<endpoint>_ext
 
-    over:
+    Sources:
       gs://BUCKET_NAME/mbta-dataset/<endpoint>/*.json
       gs://BUCKET_NAME/mbta-dataset/<endpoint>/route=*/*.json
     """
 
     for ep in ENDPOINTS:
         if ep in FILTERED_ENDPOINTS:
-            source_uris = [f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/route=*/*.json"]
+            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/route=*/*.json"
         else:
-            source_uris = [f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"]
+            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"
 
-        BigQueryCreateExternalTableOperator(
+        table_id = f"{PROJECT_ID}.{BQ_DATASET}.{ep}_ext"
+
+        BigQueryInsertJobOperator(
             task_id=f"create_ext_{ep}",
-            table_resource={
-                "tableReference": {
-                    "projectId": PROJECT_ID,
-                    "datasetId": BQ_DATASET,
-                    "tableId": f"{ep}_ext",
-                },
-                "externalDataConfiguration": {
-                    "sourceFormat": "NEWLINE_DELIMITED_JSON",
-                    "sourceUris": source_uris,
-                    "autodetect": True,
-                },
+            configuration={
+                "query": {
+                    "query": f"""
+                        CREATE OR REPLACE EXTERNAL TABLE `{table_id}`
+                        OPTIONS (
+                          format = 'NEWLINE_DELIMITED_JSON',
+                          uris = ['{source_uri}'],
+                          autodetect = TRUE
+                        )
+                    """,
+                    "useLegacySql": False,
+                }
             },
         )
 
