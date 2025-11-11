@@ -62,12 +62,11 @@ GCP_CONN = "google_cloud_default"
 TIMEZONE = "America/New_York"
 API_KEY = os.environ.get("MBTA_API_KEY") or "4e3c51157a42404394aed06ee9a548bb"
 
-# Cloud Function HTTP backfill URL (set this in Astro/Env)
+# Cloud Function HTTP backfill URL
 CF_BACKFILL_URL = os.environ.get(
     "MBTA_CF_BACKFILL_URL",
     "https://us-central1-christina-ba882-fall25.cloudfunctions.net/http_gcs_to_bq",
 )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DAG 1: SNAPSHOT MBTA ENDPOINTS → GCS (RAW JSON)
@@ -87,9 +86,7 @@ CF_BACKFILL_URL = os.environ.get(
     tags=["mbta", "gcs", "snapshots"],
 )
 def mbta_all_to_gcs():
-    """
-    Weekly snapshot of multiple MBTA endpoints into GCS.
-    """
+    """Weekly snapshot of multiple MBTA endpoints into GCS."""
 
     @task
     def build_run_info() -> dict:
@@ -157,13 +154,11 @@ def mbta_all_to_gcs():
         return _inner
 
     run_info = build_run_info()
-
     fetch_tasks = []
     for ep in ENDPOINTS:
         t = make_fetch_task(ep)
         fetch_tasks.append(t(run_info))
 
-    # After all fetch tasks finish, trigger external tables DAG
     trigger_ext = TriggerDagRunOperator(
         task_id="trigger_mbta_bq_external_tables",
         trigger_dag_id="mbta_bq_external_tables",
@@ -175,7 +170,6 @@ def mbta_all_to_gcs():
 
 
 mbta_all_to_gcs_dag = mbta_all_to_gcs()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DAG 2: CREATE/REFRESH BIGQUERY EXTERNAL TABLES, THEN TRIGGER BACKFILL
@@ -190,35 +184,36 @@ mbta_all_to_gcs_dag = mbta_all_to_gcs()
     tags=["mbta", "bigquery", "external"],
 )
 def mbta_bq_external_tables():
-    """
-    One external table per MBTA endpoint:
-
-      data_from_gcs_to_bq.<endpoint>_ext
-
-    Then trigger the native backfill DAG.
-    """
+    """One external table per MBTA endpoint: dataset.<endpoint>_ext"""
 
     create_tasks = []
 
     for ep in ENDPOINTS:
+        # Build the list of URIs explicitly
         if ep in FILTERED_ENDPOINTS:
-            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/route=*/*.json"
+            uris = [
+                f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/route={route_id}/*.json"
+                for route_id in ROUTES_OF_INTEREST
+            ]
         else:
-            source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"
+            uris = [f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*.json"]
 
+        uris_literal = ", ".join(f"'{u}'" for u in uris)
         table_id = f"{PROJECT_ID}.{BQ_DATASET}.{ep}_ext"
+
+        query = f"""
+            CREATE OR REPLACE EXTERNAL TABLE `{table_id}`
+            OPTIONS (
+              format = 'NEWLINE_DELIMITED_JSON',
+              uris = [{uris_literal}]
+            )
+        """
 
         t = BigQueryInsertJobOperator(
             task_id=f"create_ext_{ep}",
             configuration={
                 "query": {
-                    "query": f"""
-                        CREATE OR REPLACE EXTERNAL TABLE `{table_id}`
-                        OPTIONS (
-                          format = 'NEWLINE_DELIMITED_JSON',
-                          uris = ['{source_uri}']
-                        )
-                    """,
+                    "query": query,
                     "useLegacySql": False,
                 }
             },
@@ -237,7 +232,6 @@ def mbta_bq_external_tables():
 
 mbta_bq_external_tables_dag = mbta_bq_external_tables()
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # DAG 3: TRIGGER CLOUD FUNCTION BACKFILL → NATIVE BIGQUERY TABLES
 # ─────────────────────────────────────────────────────────────────────────────
@@ -251,55 +245,38 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
     tags=["mbta", "cloud-function", "bigquery", "native"],
 )
 def mbta_cf_backfill_native():
-    """
-    Calls the HTTP-triggered Cloud Function that runs load_all_existing_from_gcs()
-    to scan:
-      gs://ba882-team10-bucket/mbta-dataset/*
-    and upsert/insert into native flattened tables in BigQuery.
-    """
+    """Trigger the Cloud Function that loads GCS → native BigQuery tables."""
 
     @task(task_id="trigger_load_all_existing_from_gcs")
     def trigger_cf():
-        # Fail fast with a clear message if URL is not configured
-        if (
-            not CF_BACKFILL_URL
-            or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL
-        ):
+        if not CF_BACKFILL_URL or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL:
             raise ValueError(
-                "MBTA_CF_BACKFILL_URL is not set to a valid Cloud Function URL. "
-                "Configure it in your deployment environment."
+                "MBTA_CF_BACKFILL_URL is not set to a valid Cloud Function URL."
             )
 
         try:
-            # Give the CF up to 300 seconds
             resp = requests.get(CF_BACKFILL_URL, timeout=300)
             print("Cloud Function status code:", resp.status_code)
             print("Cloud Function response text:", resp.text)
 
-            # Handle HTTP status codes explicitly
             try:
                 resp.raise_for_status()
             except HTTPError as e:
-                # If Cloud Function gateway returns 504, treat as "best-effort success"
                 if e.response is not None and e.response.status_code == 504:
                     print(
                         "⚠️ Cloud Function returned 504 Gateway Timeout "
-                        "(upstream request timeout). Treating as non-fatal. "
-                        "Check CF logs for how much work was done."
+                        "(upstream request timeout). Treating as non-fatal."
                     )
                     return f"504 from CF: {e.response.text}"
-                # For any other HTTP error, re-raise and fail the task
                 raise
 
             return resp.text
 
         except ReadTimeout:
-            # Do NOT fail the task on client-side timeout; CF may still be running or already finished
             print(
-                "⚠️ Cloud Function call timed out on the client side after 300s; "
-                "treating as success. Check CF logs for completion details."
+                "⚠️ Cloud Function call timed out after 300s; treating as success."
             )
-            return "Timed out waiting for Cloud Function, but continuing."
+            return "Timed out waiting for Cloud Function."
 
     trigger_cf()
 
