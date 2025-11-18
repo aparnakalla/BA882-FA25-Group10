@@ -37,6 +37,7 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
     We extract attributes and relationship ids into a flat dict.
     IMPORTANT:
       - Any list/dict attribute values are JSON-serialized so they can go into STRING fields.
+      - All primitive values (int, float, bool, str) are cast to STRING, except None.
       - route_hint (from GCS path) is added as 'route_hint' column if present.
     """
     data = obj.get("data", [])
@@ -50,11 +51,15 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
         # attributes
         attrs = item.get("attributes", {}) or {}
         for k, v in attrs.items():
-            # Convert complex types (list/dict) to JSON strings so they can be stored in STRING fields
+            # Complex types (list/dict) → JSON string
             if isinstance(v, (dict, list)):
                 rec[k] = json.dumps(v)
+            elif v is None:
+                # Keep NULLs as NULL
+                rec[k] = None
             else:
-                rec[k] = v
+                # Everything else (int, float, bool, str, etc.) → STRING
+                rec[k] = str(v)
 
         # relationships (pluck obvious ids if present)
         rels = item.get("relationships", {}) or {}
@@ -144,7 +149,7 @@ def _process_one_object(bucket: str, name: str) -> int:
 
     rows = _flatten_mbta_json(obj, route_hint)
 
-    # ✅ IMPORTANT: If file has no rows, skip without creating an empty-schema table
+    # If file has no rows, skip without creating an empty-schema table
     if not rows:
         print(f"No rows in file {name}; skipping table {table_id}")
         return 0
@@ -174,13 +179,17 @@ def http_gcs_to_bq(request):
 
     Modes:
 
-    1) Bulk mode (what your Airflow DAG uses now):
-       - Airflow sends a simple GET with no body.
-       - We use BUCKET_NAME and PREFIX env vars (or defaults) and
-         scan all *.json files under that prefix.
+    1) Bulk mode:
+       - GET with no body.
+       - Uses BUCKET_NAME and PREFIX env vars (or defaults) and
+         scans all *.json files under that prefix.
 
-    2) Single-object mode (optional for future use):
-       - Request body JSON:
+    2) Filtered/bulk mode:
+       - POST with JSON including "prefix":
+           {"bucket": "...", "prefix": "mbta-dataset/routes/"}
+
+    3) Single-object mode:
+       - POST with JSON including "name":
            {
              "bucket": "...",
              "name": "mbta-dataset/routes/routes_20251109.json"
@@ -237,4 +246,3 @@ def http_gcs_to_bq(request):
             500,
             {"Content-Type": "application/json"},
         )
-
