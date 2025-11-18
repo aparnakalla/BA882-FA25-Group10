@@ -228,7 +228,7 @@ def mbta_bq_external_tables():
 mbta_bq_external_tables_dag = mbta_bq_external_tables()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DAG 3: TRIGGER CLOUD FUNCTION BACKFILL → NATIVE BIGQUERY TABLES
+# DAG 3: PARALLEL CF BACKFILL → NATIVE BIGQUERY TABLES
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dag(
@@ -240,33 +240,58 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
     tags=["mbta", "cloud-function", "bigquery", "native"],
 )
 def mbta_cf_backfill_native():
-    """Trigger the Cloud Function that loads GCS → native BigQuery tables."""
+    """Trigger the Cloud Function to load each endpoint's JSON from GCS
+    into its corresponding native BigQuery table, in parallel."""
 
-    @task(task_id="trigger_load_all_existing_from_gcs")
-    def trigger_cf():
-        if not CF_BACKFILL_URL or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL:
-            raise ValueError("MBTA_CF_BACKFILL_URL is not set correctly.")
+    def make_cf_task(endpoint: str):
+        @task(task_id=f"load_{endpoint}_native")
+        def _inner(endpoint: str = endpoint):
+            if not CF_BACKFILL_URL or "YOUR_CLOUD_FUNCTION_URL" in CF_BACKFILL_URL:
+                raise ValueError("MBTA_CF_BACKFILL_URL is not set correctly.")
 
-        try:
-            resp = requests.get(CF_BACKFILL_URL, timeout=300)
-            print("Cloud Function status:", resp.status_code)
-            print("Response:", resp.text)
+            # Call Cloud Function only for this endpoint's folder
+            payload = {
+                "bucket": BUCKET_NAME,
+                # e.g. "mbta-dataset/routes/" or "mbta-dataset/predictions/"
+                "prefix": f"{PREFIX}/{endpoint}/",
+            }
 
             try:
-                resp.raise_for_status()
-            except HTTPError as e:
-                if e.response is not None and e.response.status_code == 504:
-                    print("⚠️ 504 timeout — non-fatal, check CF logs.")
-                    return f"504 from CF: {e.response.text}"
-                raise
+                resp = requests.post(
+                    CF_BACKFILL_URL,
+                    json=payload,
+                    timeout=300,
+                )
+                print(f"[{endpoint}] Cloud Function status:", resp.status_code)
+                print(f"[{endpoint}] Response:", resp.text)
 
-            return resp.text
+                try:
+                    resp.raise_for_status()
+                except HTTPError as e:
+                    # Treat 504s as non-fatal (likely long-running CF)
+                    if e.response is not None and e.response.status_code == 504:
+                        print(
+                            f"[{endpoint}] ⚠️ 504 timeout — non-fatal, "
+                            "check CF logs."
+                        )
+                        return f"504 from CF: {e.response.text}"
+                    raise
 
-        except ReadTimeout:
-            print("⚠️ Cloud Function call timed out after 300s; treating as success.")
-            return "Timed out waiting for Cloud Function."
+                return resp.text
 
-    trigger_cf()
+            except ReadTimeout:
+                # Local timeout from Airflow side — also treat as soft-success
+                print(
+                    f"[{endpoint}] ⚠️ Cloud Function call timed out "
+                    "after 300s; treating as success."
+                )
+                return "Timed out waiting for Cloud Function."
+
+        return _inner
+
+    # One independent task per endpoint → Airflow runs them in parallel
+    for ep in ENDPOINTS:
+        make_cf_task(ep)()
 
 
 mbta_cf_backfill_native_dag = mbta_cf_backfill_native()
