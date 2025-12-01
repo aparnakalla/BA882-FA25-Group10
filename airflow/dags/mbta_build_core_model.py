@@ -7,7 +7,9 @@ import pendulum
 from airflow.decorators import dag
 from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 
-# Reuse the same env/config pattern you already have
+# ------------------------------------------------------------------------------
+# CONFIG
+# ------------------------------------------------------------------------------
 PROJECT_ID = os.environ.get("PROJECT_ID", "christina-ba882-fall25")
 RAW_DATASET = os.environ.get("BQ_DATASET", "data_from_gcs_to_bq")  # native tables
 CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
@@ -28,6 +30,14 @@ TIMEZONE = "America/New_York"
     tags=["mbta", "core-model", "bigquery"],
 )
 def mbta_build_core_model():
+    """
+    Build core MBTA data model (dimensions + facts) in BigQuery.
+
+    - Reads from native/raw tables in {PROJECT_ID}.{RAW_DATASET}
+    - Deduplicates on (id, snapshot_date) using ROW_NUMBER()
+    - Writes cleaned dims/facts into {PROJECT_ID}.{CORE_DATASET}
+    """
+
     # ───────────── DIMENSIONS ─────────────
 
     dim_line = BigQueryInsertJobOperator(
@@ -199,7 +209,6 @@ def mbta_build_core_model():
 
     # ───────────── FACTS (WITH DEDUP) ─────────────
 
-    # Schedules: not time-varying per se, but we still dedup by id+snapshot_date
     fact_schedule = BigQueryInsertJobOperator(
         task_id="build_fact_schedule_stop",
         configuration={
@@ -239,7 +248,6 @@ def mbta_build_core_model():
         },
     )
 
-    # Predictions: this is the main one we care about for delays – dedup strongly
     fact_prediction = BigQueryInsertJobOperator(
         task_id="build_fact_prediction_stop",
         configuration={
@@ -256,7 +264,7 @@ def mbta_build_core_model():
                       FROM `{PROJECT_ID}.{RAW_DATASET}.predictions`
                     )
                     SELECT
-                      id              AS prediction_id,
+                      id                   AS prediction_id,
                       TIMESTAMP(ingest_ts) AS prediction_ts,
                       trip_id,
                       route_id,
@@ -280,7 +288,6 @@ def mbta_build_core_model():
         },
     )
 
-    # Vehicles: dedup on (vehicle id + updated_at + snapshot_date)
     fact_vehicle = BigQueryInsertJobOperator(
         task_id="build_fact_vehicle_position",
         configuration={
@@ -401,14 +408,14 @@ def mbta_build_core_model():
                       arrival_time_predicted,
                       -- Convert HH:MM:SS to full timestamps using snapshot_date as the date
                       TIMESTAMP_DIFF(
-                        TIMESTAMP(CONCAT(snapshot_date, ' ', arrival_time_predicted)),
-                        TIMESTAMP(CONCAT(snapshot_date, ' ', arrival_time_scheduled)),
+                        TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_predicted)),
+                        TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_scheduled)),
                         SECOND
                       ) AS delay_seconds,
                       CASE WHEN
                         TIMESTAMP_DIFF(
-                          TIMESTAMP(CONCAT(snapshot_date, ' ', arrival_time_predicted)),
-                          TIMESTAMP(CONCAT(snapshot_date, ' ', arrival_time_scheduled)),
+                          TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_predicted)),
+                          TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_scheduled)),
                           SECOND
                         ) > 300
                       THEN 1 ELSE 0 END AS is_delayed_5min,
@@ -423,12 +430,32 @@ def mbta_build_core_model():
         },
     )
 
-    # dimensions first → facts → delays
-    (
-        [dim_line, dim_route, dim_stop, dim_trip, dim_route_pattern, dim_shape, dim_facility]
-        >> [fact_schedule, fact_prediction, fact_vehicle, fact_alert]
-        >> fact_delay
-    )
+    # ───────────── DEPENDENCIES ─────────────
+
+    core_dims = [
+        dim_line,
+        dim_route,
+        dim_stop,
+        dim_trip,
+        dim_route_pattern,
+        dim_shape,
+        dim_facility,
+    ]
+
+    core_facts = [
+        fact_schedule,
+        fact_prediction,
+        fact_vehicle,
+        fact_alert,
+    ]
+
+    # All dimensions must complete before each core fact
+    for f in core_facts:
+        core_dims >> f
+
+    # All core facts must complete before delay fact
+    core_facts >> fact_delay
 
 
 mbta_build_core_model_dag = mbta_build_core_model()
+
