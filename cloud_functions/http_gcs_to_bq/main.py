@@ -1,5 +1,6 @@
 import json
 import os
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 
 from google.cloud import storage, bigquery
@@ -37,7 +38,7 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
     We extract attributes and relationship ids into a flat dict.
     IMPORTANT:
       - Any list/dict attribute values are JSON-serialized so they can go into STRING fields.
-      - All primitive values (int, float, bool, str) are cast to STRING, except None.
+      - All primitive values (int, float, bool, str, etc.) are cast to STRING, except None.
       - route_hint (from GCS path) is added as 'route_hint' column if present.
     """
     data = obj.get("data", [])
@@ -83,15 +84,16 @@ def _flatten_mbta_json(obj: Dict[str, Any], route_hint: Optional[str]) -> List[D
     return out
 
 
-def _infer_table_from_path(gcs_name: str) -> Tuple[str, Optional[str]]:
+def _infer_table_from_path(gcs_name: str) -> Tuple[str, Optional[str], Optional[str]]:
     """
     Expect paths like:
       mbta-dataset/routes/routes_20251109.json
       mbta-dataset/predictions/route=Red/predictions_20251109.json
 
     Returns:
-      table_name (e.g. "routes", "predictions", ...)
-      route_hint (e.g. "Red") or None
+      table_name (e.g. "routes", "predictions", ...),
+      route_hint (e.g. "Red") or None,
+      snapshot_date (YYYY-MM-DD string) or None
     """
     parts = gcs_name.split("/")
     if len(parts) < 2:
@@ -100,11 +102,26 @@ def _infer_table_from_path(gcs_name: str) -> Tuple[str, Optional[str]]:
     # second part is the endpoint folder: routes, predictions, trips, etc.
     table = parts[1]
     route_hint = None
+    snapshot_date: Optional[str] = None
+
+    # route=Red / route=Green-B / etc.
     for p in parts:
         if p.startswith("route="):
             route_hint = p.split("=", 1)[1]
             break
-    return table, route_hint
+
+    # last part: e.g. predictions_20251109.json
+    filename = parts[-1]
+    try:
+        # assume <endpoint>_<yyyymmdd>.json
+        date_str = filename.split("_")[-1].split(".")[0]
+        dt = datetime.strptime(date_str, "%Y%m%d")
+        snapshot_date = dt.strftime("%Y-%m-%d")
+    except Exception as e:
+        print(f"Could not parse snapshot_date from {filename}: {e}")
+        snapshot_date = None
+
+    return table, route_hint, snapshot_date
 
 
 def _insert_rows(table_id: str, rows: List[Dict[str, Any]]) -> int:
@@ -137,9 +154,10 @@ def _insert_rows(table_id: str, rows: List[Dict[str, Any]]) -> int:
 def _process_one_object(bucket: str, name: str) -> int:
     """
     Process a single GCS object and insert rows into BigQuery.
+    Adds snapshot_date (DATE) and ingest_ts (TIMESTAMP) to each row.
     """
     print(f"Processing gs://{bucket}/{name}")
-    table_name, route_hint = _infer_table_from_path(name)
+    table_name, route_hint, snapshot_date = _infer_table_from_path(name)
     table_id = f"{PROJECT_ID}.{BQ_DATASET}.{table_name}"
 
     # Download object
@@ -154,13 +172,27 @@ def _process_one_object(bucket: str, name: str) -> int:
         print(f"No rows in file {name}; skipping table {table_id}")
         return 0
 
+    # Append snapshot_date / ingest_ts to every row
+    now_ts = datetime.now(timezone.utc).isoformat()
+    for r in rows:
+        if snapshot_date:
+            r["snapshot_date"] = snapshot_date  # BigQuery DATE accepts "YYYY-MM-DD"
+        r["ingest_ts"] = now_ts                # TIMESTAMP
+
     # Ensure table exists (create with inferred schema if needed)
     try:
         bq_client.get_table(table_id)
         print(f"Table {table_id} exists.")
     except Exception:
         sample = rows[0]
-        schema = [bigquery.SchemaField(k, "STRING") for k in sample.keys()]
+        schema = []
+        for k in sample.keys():
+            if k == "snapshot_date":
+                schema.append(bigquery.SchemaField(k, "DATE"))
+            elif k == "ingest_ts":
+                schema.append(bigquery.SchemaField(k, "TIMESTAMP"))
+            else:
+                schema.append(bigquery.SchemaField(k, "STRING"))
         table = bigquery.Table(table_id, schema=schema)
         bq_client.create_table(table)
         print(f"Created table {table_id} with inferred schema")
