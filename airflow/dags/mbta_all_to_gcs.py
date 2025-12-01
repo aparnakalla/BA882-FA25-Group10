@@ -188,7 +188,7 @@ def mbta_bq_external_tables():
     create_tasks = []
 
     for ep in ENDPOINTS:
-        # ✅ FIX: only one wildcard; supports nested route folders
+        # only one wildcard; supports nested route folders
         if ep in FILTERED_ENDPOINTS:
             source_uri = f"gs://{BUCKET_NAME}/{PREFIX}/{ep}/*"
         else:
@@ -228,7 +228,7 @@ def mbta_bq_external_tables():
 mbta_bq_external_tables_dag = mbta_bq_external_tables()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DAG 3: PARALLEL CF BACKFILL → NATIVE BIGQUERY TABLES
+# DAG 3: PARALLEL CF BACKFILL → NATIVE BIGQUERY TABLES, THEN TRIGGER CORE MODEL
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dag(
@@ -241,7 +241,7 @@ mbta_bq_external_tables_dag = mbta_bq_external_tables()
 )
 def mbta_cf_backfill_native():
     """Trigger the Cloud Function to load each endpoint's JSON from GCS
-    into its corresponding native BigQuery table, in parallel."""
+    into its corresponding native BigQuery table, in parallel, then build core model."""
 
     def make_cf_task(endpoint: str):
         @task(task_id=f"load_{endpoint}_native")
@@ -290,8 +290,21 @@ def mbta_cf_backfill_native():
         return _inner
 
     # One independent task per endpoint → Airflow runs them in parallel
+    load_tasks = []
     for ep in ENDPOINTS:
-        make_cf_task(ep)()
+        t = make_cf_task(ep)()
+        load_tasks.append(t)
+
+    # Trigger the core model DAG after all native loads are done
+    trigger_core_model = TriggerDagRunOperator(
+        task_id="trigger_mbta_build_core_model",
+        trigger_dag_id="mbta_build_core_model",
+        wait_for_completion=False,
+    )
+
+    for t in load_tasks:
+        t >> trigger_core_model
 
 
 mbta_cf_backfill_native_dag = mbta_cf_backfill_native()
+
