@@ -14,6 +14,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "christina-ba882-fall25")
 RAW_DATASET = os.environ.get("BQ_DATASET", "data_from_gcs_to_bq")  # native tables
 CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
 TIMEZONE = "America/New_York"
+# IMPORTANT: match your BigQuery dataset location
+BQ_LOCATION = os.environ.get("BQ_LOCATION", "us-central1")
 
 
 @dag(
@@ -42,6 +44,7 @@ def mbta_build_core_model():
 
     dim_line = BigQueryInsertJobOperator(
         task_id="build_dim_line",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -65,6 +68,7 @@ def mbta_build_core_model():
 
     dim_route = BigQueryInsertJobOperator(
         task_id="build_dim_route",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -92,6 +96,7 @@ def mbta_build_core_model():
 
     dim_stop = BigQueryInsertJobOperator(
         task_id="build_dim_stop",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -117,6 +122,7 @@ def mbta_build_core_model():
 
     dim_trip = BigQueryInsertJobOperator(
         task_id="build_dim_trip",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -142,6 +148,7 @@ def mbta_build_core_model():
 
     dim_route_pattern = BigQueryInsertJobOperator(
         task_id="build_dim_route_pattern",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -166,6 +173,7 @@ def mbta_build_core_model():
 
     dim_shape = BigQueryInsertJobOperator(
         task_id="build_dim_shape",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -185,6 +193,7 @@ def mbta_build_core_model():
 
     dim_facility = BigQueryInsertJobOperator(
         task_id="build_dim_facility",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -211,6 +220,7 @@ def mbta_build_core_model():
 
     fact_schedule = BigQueryInsertJobOperator(
         task_id="build_fact_schedule_stop",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -250,6 +260,7 @@ def mbta_build_core_model():
 
     fact_prediction = BigQueryInsertJobOperator(
         task_id="build_fact_prediction_stop",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -290,6 +301,7 @@ def mbta_build_core_model():
 
     fact_vehicle = BigQueryInsertJobOperator(
         task_id="build_fact_vehicle_position",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -331,6 +343,7 @@ def mbta_build_core_model():
 
     fact_alert = BigQueryInsertJobOperator(
         task_id="build_fact_alert",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -372,9 +385,9 @@ def mbta_build_core_model():
         },
     )
 
-    # fact_delay_stop: join schedule + prediction, compute delay_seconds + label
     fact_delay = BigQueryInsertJobOperator(
         task_id="build_fact_delay_stop",
+        location=BQ_LOCATION,
         configuration={
             "query": {
                 "query": f"""
@@ -406,7 +419,6 @@ def mbta_build_core_model():
                       prediction_ts,
                       arrival_time_scheduled,
                       arrival_time_predicted,
-                      -- Convert HH:MM:SS to full timestamps using snapshot_date as the date
                       TIMESTAMP_DIFF(
                         TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_predicted)),
                         TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_scheduled)),
@@ -458,4 +470,3 @@ def mbta_build_core_model():
 
 
 mbta_build_core_model_dag = mbta_build_core_model()
-
