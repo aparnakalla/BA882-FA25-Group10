@@ -11,11 +11,17 @@ from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobO
 # CONFIG
 # ------------------------------------------------------------------------------
 PROJECT_ID = os.environ.get("PROJECT_ID", "christina-ba882-fall25")
-RAW_DATASET = os.environ.get("BQ_DATASET", "data_from_gcs_to_bq")  # native tables
+
+# Native/raw tables (where your Cloud Function is writing now)
+RAW_DATASET = os.environ.get("BQ_DATASET", "data_from_gcs_to_bq")
+
+# Core/star-schema dataset for dims + facts
 CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
+
 TIMEZONE = "America/New_York"
-# IMPORTANT: match your BigQuery dataset location
-BQ_LOCATION = os.environ.get("BQ_LOCATION", "us-central1")
+
+# Use the new connection you created in the Airflow UI
+GCP_BQ_CONN_ID = os.environ.get("GCP_BQ_CONN_ID", "google_cloud_us_central1")
 
 
 @dag(
@@ -44,7 +50,7 @@ def mbta_build_core_model():
 
     dim_line = BigQueryInsertJobOperator(
         task_id="build_dim_line",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -68,7 +74,7 @@ def mbta_build_core_model():
 
     dim_route = BigQueryInsertJobOperator(
         task_id="build_dim_route",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -96,7 +102,7 @@ def mbta_build_core_model():
 
     dim_stop = BigQueryInsertJobOperator(
         task_id="build_dim_stop",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -122,7 +128,7 @@ def mbta_build_core_model():
 
     dim_trip = BigQueryInsertJobOperator(
         task_id="build_dim_trip",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -148,7 +154,7 @@ def mbta_build_core_model():
 
     dim_route_pattern = BigQueryInsertJobOperator(
         task_id="build_dim_route_pattern",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -173,7 +179,7 @@ def mbta_build_core_model():
 
     dim_shape = BigQueryInsertJobOperator(
         task_id="build_dim_shape",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -193,7 +199,7 @@ def mbta_build_core_model():
 
     dim_facility = BigQueryInsertJobOperator(
         task_id="build_dim_facility",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -220,7 +226,7 @@ def mbta_build_core_model():
 
     fact_schedule = BigQueryInsertJobOperator(
         task_id="build_fact_schedule_stop",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -260,7 +266,7 @@ def mbta_build_core_model():
 
     fact_prediction = BigQueryInsertJobOperator(
         task_id="build_fact_prediction_stop",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -301,7 +307,7 @@ def mbta_build_core_model():
 
     fact_vehicle = BigQueryInsertJobOperator(
         task_id="build_fact_vehicle_position",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -343,7 +349,7 @@ def mbta_build_core_model():
 
     fact_alert = BigQueryInsertJobOperator(
         task_id="build_fact_alert",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
@@ -385,9 +391,10 @@ def mbta_build_core_model():
         },
     )
 
+    # fact_delay_stop: join schedule + prediction, compute delay_seconds + label
     fact_delay = BigQueryInsertJobOperator(
         task_id="build_fact_delay_stop",
-        location=BQ_LOCATION,
+        gcp_conn_id=GCP_BQ_CONN_ID,
         configuration={
             "query": {
                 "query": f"""
