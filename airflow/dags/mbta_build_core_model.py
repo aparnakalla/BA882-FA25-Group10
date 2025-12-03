@@ -21,7 +21,7 @@ CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
 TIMEZONE = "America/New_York"
 
 # Use the new connection you created in the Airflow UI
-GCP_BQ_CONN_ID = os.environ.get("GCP_BQ_CONN_ID", "google_cloud_us_central1")
+GCP_BQ_CONN_ID = "google_cloud_default"
 
 
 @dag(
