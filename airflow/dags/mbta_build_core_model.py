@@ -428,14 +428,14 @@ def mbta_build_core_model() -> None:
                       arrival_time_scheduled,
                       arrival_time_predicted,
                       TIMESTAMP_DIFF(
-                        TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_predicted)),
-                        TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_scheduled)),
+                        TIMESTAMP(arrival_time_predicted),
+                        TIMESTAMP(arrival_time_scheduled),
                         SECOND
                       ) AS delay_seconds,
                       CASE WHEN
                         TIMESTAMP_DIFF(
-                          TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_predicted)),
-                          TIMESTAMP(CONCAT(CAST(snapshot_date AS STRING), ' ', arrival_time_scheduled)),
+                          TIMESTAMP(arrival_time_predicted),
+                          TIMESTAMP(arrival_time_scheduled),
                           SECOND
                         ) > 300
                       THEN 1 ELSE 0 END AS is_delayed_5min,
@@ -449,6 +449,7 @@ def mbta_build_core_model() -> None:
             }
         },
     )
+
 
     # ───────────── DEPENDENCIES ─────────────
 
