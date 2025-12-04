@@ -37,13 +37,16 @@ GCP_BQ_CONN_ID = "google_cloud_default"
     },
     tags=["mbta", "core-model", "bigquery"],
 )
-def mbta_build_core_model():
+def mbta_build_core_model() -> None:
     """
-    Build core MBTA data model (dimensions + facts) in BigQuery.
+    Build the MBTA core/star schema in BigQuery from the native/raw tables.
 
-    - Reads from native/raw tables in {PROJECT_ID}.{RAW_DATASET}
-    - Deduplicates on (id, snapshot_date) using ROW_NUMBER()
-    - Writes cleaned dims/facts into {PROJECT_ID}.{CORE_DATASET}
+    Assumptions:
+    - Native/raw tables live in `{PROJECT_ID}.{RAW_DATASET}`
+    - Output dims/facts live in `{PROJECT_ID}.{CORE_DATASET}`
+    - Each native table has `ingest_ts` (TIMESTAMP)
+    - We derive `snapshot_date` as `DATE(ingest_ts)` in the core model
+    - Deduplicates on (id) using ROW_NUMBER() ordered by ingest_ts
     """
 
     # ───────────── DIMENSIONS ─────────────
@@ -63,7 +66,7 @@ def mbta_build_core_model():
                       color,
                       sort_order,
                       text_color,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM `{PROJECT_ID}.{RAW_DATASET}.lines`;
                 """,
@@ -80,18 +83,12 @@ def mbta_build_core_model():
                 "query": f"""
                     CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.dim_route` AS
                     SELECT DISTINCT
-                      id           AS route_id,
-                      type         AS route_type,
-                      color        AS route_color,
-                      text_color   AS route_text_color,
-                      long_name    AS route_long_name,
-                      short_name   AS route_short_name,
-                      description  AS route_description,
-                      line_id      AS line_id,
+                      id          AS route_id,
+                      line_id     AS line_id,
                       fare_class,
                       listed_route,
                       sort_order,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM `{PROJECT_ID}.{RAW_DATASET}.routes`;
                 """,
@@ -117,9 +114,54 @@ def mbta_build_core_model():
                       parent_station_id,
                       platform_name,
                       vehicle_type,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM `{PROJECT_ID}.{RAW_DATASET}.stops`;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
+
+    dim_route_pattern = BigQueryInsertJobOperator(
+        task_id="build_dim_route_pattern",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.dim_route_pattern` AS
+                    SELECT DISTINCT
+                      id                  AS route_pattern_id,
+                      route_id,
+                      direction_id,
+                      name,
+                      canonical,
+                      typicality,
+                      time_desc,
+                      representative_trip_id,
+                      DATE(ingest_ts) AS snapshot_date,
+                      ingest_ts
+                    FROM `{PROJECT_ID}.{RAW_DATASET}.route_patterns`;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
+
+    dim_shape = BigQueryInsertJobOperator(
+        task_id="build_dim_shape",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.dim_shape` AS
+                    SELECT DISTINCT
+                      id        AS shape_id,
+                      polyline,
+                      route_hint,
+                      DATE(ingest_ts) AS snapshot_date,
+                      ingest_ts
+                    FROM `{PROJECT_ID}.{RAW_DATASET}.shapes`;
                 """,
                 "useLegacySql": False,
             }
@@ -143,54 +185,9 @@ def mbta_build_core_model():
                       shape_id,
                       bikes_allowed,
                       wheelchair_accessible,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM `{PROJECT_ID}.{RAW_DATASET}.trips`;
-                """,
-                "useLegacySql": False,
-            }
-        },
-    )
-
-    dim_route_pattern = BigQueryInsertJobOperator(
-        task_id="build_dim_route_pattern",
-        gcp_conn_id=GCP_BQ_CONN_ID,
-        configuration={
-            "query": {
-                "query": f"""
-                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.dim_route_pattern` AS
-                    SELECT DISTINCT
-                      id                  AS route_pattern_id,
-                      route_id,
-                      direction_id,
-                      name,
-                      canonical,
-                      typicality,
-                      time_desc,
-                      representative_trip_id,
-                      snapshot_date,
-                      ingest_ts
-                    FROM `{PROJECT_ID}.{RAW_DATASET}.route_patterns`;
-                """,
-                "useLegacySql": False,
-            }
-        },
-    )
-
-    dim_shape = BigQueryInsertJobOperator(
-        task_id="build_dim_shape",
-        gcp_conn_id=GCP_BQ_CONN_ID,
-        configuration={
-            "query": {
-                "query": f"""
-                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.dim_shape` AS
-                    SELECT DISTINCT
-                      id        AS shape_id,
-                      polyline,
-                      route_hint,
-                      snapshot_date,
-                      ingest_ts
-                    FROM `{PROJECT_ID}.{RAW_DATASET}.shapes`;
                 """,
                 "useLegacySql": False,
             }
@@ -213,7 +210,7 @@ def mbta_build_core_model():
                       latitude,
                       longitude,
                       properties,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM `{PROJECT_ID}.{RAW_DATASET}.facilities`;
                 """,
@@ -222,8 +219,9 @@ def mbta_build_core_model():
         },
     )
 
-    # ───────────── FACTS (WITH DEDUP) ─────────────
+    # ───────────── FACTS ─────────────
 
+    # fact_schedule_stop: one row per scheduled stop-time
     fact_schedule = BigQueryInsertJobOperator(
         task_id="build_fact_schedule_stop",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -235,7 +233,7 @@ def mbta_build_core_model():
                       SELECT
                         *,
                         ROW_NUMBER() OVER (
-                          PARTITION BY id, snapshot_date
+                          PARTITION BY id
                           ORDER BY ingest_ts DESC
                         ) AS rn
                       FROM `{PROJECT_ID}.{RAW_DATASET}.schedules`
@@ -254,7 +252,7 @@ def mbta_build_core_model():
                       stop_headsign,
                       timepoint,
                       route_hint,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM ranked
                     WHERE rn = 1;
@@ -264,6 +262,7 @@ def mbta_build_core_model():
         },
     )
 
+    # fact_prediction_stop: one row per predicted stop-time
     fact_prediction = BigQueryInsertJobOperator(
         task_id="build_fact_prediction_stop",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -275,7 +274,7 @@ def mbta_build_core_model():
                       SELECT
                         *,
                         ROW_NUMBER() OVER (
-                          PARTITION BY id, snapshot_date
+                          PARTITION BY id
                           ORDER BY ingest_ts DESC
                         ) AS rn
                       FROM `{PROJECT_ID}.{RAW_DATASET}.predictions`
@@ -295,7 +294,7 @@ def mbta_build_core_model():
                       update_type,
                       revenue,
                       route_hint,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM ranked
                     WHERE rn = 1;
@@ -305,6 +304,7 @@ def mbta_build_core_model():
         },
     )
 
+    # fact_vehicle_position: latest position per vehicle+updated_at
     fact_vehicle = BigQueryInsertJobOperator(
         task_id="build_fact_vehicle_position",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -316,7 +316,7 @@ def mbta_build_core_model():
                       SELECT
                         *,
                         ROW_NUMBER() OVER (
-                          PARTITION BY id, updated_at, snapshot_date
+                          PARTITION BY id, updated_at
                           ORDER BY ingest_ts DESC
                         ) AS rn
                       FROM `{PROJECT_ID}.{RAW_DATASET}.vehicles`
@@ -337,7 +337,7 @@ def mbta_build_core_model():
                       occupancy_status,
                       revenue,
                       label,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM ranked
                     WHERE rn = 1;
@@ -347,6 +347,7 @@ def mbta_build_core_model():
         },
     )
 
+    # fact_alert: dedup per alert id on latest ingest_ts
     fact_alert = BigQueryInsertJobOperator(
         task_id="build_fact_alert",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -358,7 +359,7 @@ def mbta_build_core_model():
                       SELECT
                         *,
                         ROW_NUMBER() OVER (
-                          PARTITION BY id, snapshot_date
+                          PARTITION BY id
                           ORDER BY ingest_ts DESC
                         ) AS rn
                       FROM `{PROJECT_ID}.{RAW_DATASET}.alerts`
@@ -381,7 +382,7 @@ def mbta_build_core_model():
                       informed_entity,
                       closed_timestamp,
                       duration_certainty,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM ranked
                     WHERE rn = 1;
@@ -408,8 +409,8 @@ def mbta_build_core_model():
                         p.stop_id,
                         p.stop_sequence,
                         p.direction_id,
-                        p.arrival_time_predicted,
                         s.arrival_time_scheduled,
+                        p.arrival_time_predicted,
                         p.snapshot_date,
                         p.ingest_ts
                       FROM `{PROJECT_ID}.{CORE_DATASET}.fact_prediction_stop` p
@@ -438,7 +439,7 @@ def mbta_build_core_model():
                           SECOND
                         ) > 300
                       THEN 1 ELSE 0 END AS is_delayed_5min,
-                      snapshot_date,
+                      DATE(ingest_ts) AS snapshot_date,
                       ingest_ts
                     FROM joined
                     WHERE arrival_time_scheduled IS NOT NULL
@@ -455,9 +456,9 @@ def mbta_build_core_model():
         dim_line,
         dim_route,
         dim_stop,
-        dim_trip,
         dim_route_pattern,
         dim_shape,
+        dim_trip,
         dim_facility,
     ]
 
