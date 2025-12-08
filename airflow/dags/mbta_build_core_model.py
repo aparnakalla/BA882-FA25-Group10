@@ -18,6 +18,9 @@ RAW_DATASET = os.environ.get("BQ_DATASET", "data_from_gcs_to_bq")
 # Core/star-schema dataset for dims + facts
 CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
 
+# ML dataset for training tables
+ML_DATASET = os.environ.get("ML_DATASET", "mbta_ml")
+
 TIMEZONE = "America/New_York"
 
 # Airflow connection ID for GCP/BigQuery
@@ -44,6 +47,7 @@ def mbta_build_core_model() -> None:
     Assumptions:
     - Native/raw tables live in `{PROJECT_ID}.{RAW_DATASET}`
     - Output dims/facts live in `{PROJECT_ID}.{CORE_DATASET}`
+    - ML training tables live in `{PROJECT_ID}.{ML_DATASET}`
     - Each native table has `ingest_ts` (TIMESTAMP)
     - We derive `snapshot_date` as `DATE(ingest_ts)` in the core model
     - Deduplicates on (id) using ROW_NUMBER() ordered by ingest_ts
@@ -532,6 +536,45 @@ def mbta_build_core_model() -> None:
         },
     )
 
+    # ───────────── ML TRAINING TABLE ─────────────
+
+    training_delay_stop = BigQueryInsertJobOperator(
+        task_id="build_ml_training_delay_stop",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE SCHEMA IF NOT EXISTS `{PROJECT_ID}.{ML_DATASET}`;
+
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{ML_DATASET}.training_delay_stop` AS
+                    SELECT
+                      d.service_date,
+                      d.route_id,
+                      r.line_id,
+                      r.listed_route,
+                      d.trip_id,
+                      d.stop_id,
+                      s.stop_name,
+                      d.direction_id,
+                      d.stop_sequence,
+                      d.prediction_ts,
+                      EXTRACT(HOUR FROM d.prediction_ts)       AS hour_of_day,
+                      EXTRACT(DAYOFWEEK FROM d.prediction_ts)  AS day_of_week,
+                      IF(EXTRACT(DAYOFWEEK FROM d.prediction_ts) IN (1,7), 1, 0) AS is_weekend,
+                      d.delay_seconds,
+                      d.is_delayed_5min AS label_is_delayed_5min
+                    FROM `{PROJECT_ID}.{CORE_DATASET}.fact_delay_stop` d
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_route` r
+                      USING (route_id, snapshot_date)
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_stop` s
+                      USING (stop_id, snapshot_date)
+                    WHERE d.delay_seconds IS NOT NULL;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
+
     # ───────────── DEPENDENCIES ─────────────
 
     core_dims = [
@@ -558,8 +601,13 @@ def mbta_build_core_model() -> None:
     # All core facts must complete before delay fact
     core_facts >> fact_delay
 
-    # Marts depend on fact_delay_stop
-    fact_delay >> [mart_route_day_delay, mart_stop_delay, mart_line_hour_delay]
+    # Marts and ML training table depend on fact_delay_stop
+    fact_delay >> [
+        mart_route_day_delay,
+        mart_stop_delay,
+        mart_line_hour_delay,
+        training_delay_stop,
+    ]
 
 
 mbta_build_core_model_dag = mbta_build_core_model()
