@@ -20,14 +20,14 @@ CORE_DATASET = os.environ.get("CORE_DATASET", "mbta_core")
 
 TIMEZONE = "America/New_York"
 
-# Use the new connection you created in the Airflow UI
+# Airflow connection ID for GCP/BigQuery
 GCP_BQ_CONN_ID = "google_cloud_default"
 
 
 @dag(
     dag_id="mbta_build_core_model",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule=None,  # triggered from mbta_cf_backfill_native
+    schedule=None,  # triggered from upstream DAG
     catchup=False,
     max_active_runs=1,
     default_args={
@@ -221,7 +221,6 @@ def mbta_build_core_model() -> None:
 
     # ───────────── FACTS ─────────────
 
-    # fact_schedule_stop: one row per scheduled stop-time
     fact_schedule = BigQueryInsertJobOperator(
         task_id="build_fact_schedule_stop",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -262,7 +261,6 @@ def mbta_build_core_model() -> None:
         },
     )
 
-    # fact_prediction_stop: one row per predicted stop-time
     fact_prediction = BigQueryInsertJobOperator(
         task_id="build_fact_prediction_stop",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -304,7 +302,6 @@ def mbta_build_core_model() -> None:
         },
     )
 
-    # fact_vehicle_position: latest position per vehicle+updated_at
     fact_vehicle = BigQueryInsertJobOperator(
         task_id="build_fact_vehicle_position",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -347,7 +344,6 @@ def mbta_build_core_model() -> None:
         },
     )
 
-    # fact_alert: dedup per alert id on latest ingest_ts
     fact_alert = BigQueryInsertJobOperator(
         task_id="build_fact_alert",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -392,7 +388,6 @@ def mbta_build_core_model() -> None:
         },
     )
 
-    # fact_delay_stop: join schedule + prediction, compute delay_seconds + label
     fact_delay = BigQueryInsertJobOperator(
         task_id="build_fact_delay_stop",
         gcp_conn_id=GCP_BQ_CONN_ID,
@@ -450,6 +445,92 @@ def mbta_build_core_model() -> None:
         },
     )
 
+    # ───────────── MARTS ─────────────
+
+    mart_route_day_delay = BigQueryInsertJobOperator(
+        task_id="build_mart_route_day_delay",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.mart_route_day_delay` AS
+                    SELECT
+                      d.service_date,
+                      d.route_id,
+                      r.line_id,
+                      r.listed_route,
+                      COUNT(*) AS n_predictions,
+                      AVG(d.delay_seconds) AS avg_delay_seconds,
+                      APPROX_QUANTILES(d.delay_seconds, 100)[OFFSET(50)] AS p50_delay_seconds,
+                      APPROX_QUANTILES(d.delay_seconds, 100)[OFFSET(90)] AS p90_delay_seconds,
+                      AVG(CAST(d.is_delayed_5min AS INT64)) AS pct_trips_delayed_5min
+                    FROM `{PROJECT_ID}.{CORE_DATASET}.fact_delay_stop` d
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_route` r
+                      USING (route_id, snapshot_date)
+                    WHERE d.delay_seconds IS NOT NULL
+                    GROUP BY 1,2,3,4;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
+
+    mart_stop_delay = BigQueryInsertJobOperator(
+        task_id="build_mart_stop_delay",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.mart_stop_delay` AS
+                    SELECT
+                      d.service_date,
+                      d.route_id,
+                      r.line_id,
+                      r.listed_route,
+                      d.stop_id,
+                      s.stop_name,
+                      d.direction_id,
+                      COUNT(*) AS n_predictions,
+                      AVG(d.delay_seconds) AS avg_delay_seconds,
+                      AVG(CAST(d.is_delayed_5min AS INT64)) AS pct_delayed_5min
+                    FROM `{PROJECT_ID}.{CORE_DATASET}.fact_delay_stop` d
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_route` r
+                      USING (route_id, snapshot_date)
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_stop` s
+                      USING (stop_id, snapshot_date)
+                    WHERE d.delay_seconds IS NOT NULL
+                    GROUP BY 1,2,3,4,5,6,7;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
+
+    mart_line_hour_delay = BigQueryInsertJobOperator(
+        task_id="build_mart_line_hour_delay",
+        gcp_conn_id=GCP_BQ_CONN_ID,
+        configuration={
+            "query": {
+                "query": f"""
+                    CREATE OR REPLACE TABLE `{PROJECT_ID}.{CORE_DATASET}.mart_line_hour_delay` AS
+                    SELECT
+                      d.service_date,
+                      r.line_id,
+                      r.listed_route,
+                      EXTRACT(HOUR FROM d.prediction_ts) AS hour_of_day,
+                      COUNT(*) AS n_predictions,
+                      AVG(d.delay_seconds) AS avg_delay_seconds,
+                      AVG(CAST(d.is_delayed_5min AS INT64)) AS pct_delayed_5min
+                    FROM `{PROJECT_ID}.{CORE_DATASET}.fact_delay_stop` d
+                    LEFT JOIN `{PROJECT_ID}.{CORE_DATASET}.dim_route` r
+                      USING (route_id, snapshot_date)
+                    WHERE d.delay_seconds IS NOT NULL
+                    GROUP BY 1,2,3,4;
+                """,
+                "useLegacySql": False,
+            }
+        },
+    )
 
     # ───────────── DEPENDENCIES ─────────────
 
@@ -476,6 +557,9 @@ def mbta_build_core_model() -> None:
 
     # All core facts must complete before delay fact
     core_facts >> fact_delay
+
+    # Marts depend on fact_delay_stop
+    fact_delay >> [mart_route_day_delay, mart_stop_delay, mart_line_hour_delay]
 
 
 mbta_build_core_model_dag = mbta_build_core_model()
