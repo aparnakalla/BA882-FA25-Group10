@@ -15,24 +15,45 @@ DEFAULT_DATASET = "data_from_gcs_to_bq"
 DEFAULT_PROJECT = os.getenv("GCP_PROJECT")
 
 # ------------------- AUTH -------------------
+# def get_bq_client():
+#     key_path = os.path.join(os.path.dirname(__file__), "christina-ba882-fall25-b1d451bd7f68.json")
+#     credentials = None
+#     project_id = DEFAULT_PROJECT
+
+#     if os.path.exists(key_path):
+#         credentials = service_account.Credentials.from_service_account_file(key_path)
+#         project_id = project_id or credentials.project_id
+#         st.sidebar.success("✅ Using local service account file.")
+#     elif "gcp_service_account" in st.secrets:
+#         credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
+#         project_id = project_id or credentials.project_id
+#         st.sidebar.success("✅ Using Streamlit Cloud secrets.")
+#     else:
+#         st.sidebar.error("❌ No GCP credentials found.")
+#         st.stop()
+
+#     return bigquery.Client(project=project_id, credentials=credentials), project_id
+import os, json, base64
+from google.oauth2 import service_account
+from google.cloud import bigquery
+import streamlit as st
+
 def get_bq_client():
-    key_path = os.path.join(os.path.dirname(__file__), "christina-ba882-fall25-b1d451bd7f68.json")
-    credentials = None
-    project_id = DEFAULT_PROJECT
+    # 1. Local mode (Streamlit secrets available)
+    try:
+        if "gcp_service_account" in st.secrets:
+            info = st.secrets["gcp_service_account"]
+        else:
+            raise KeyError("No local Streamlit secrets")
+    except:
+        # 2. Cloud Run mode (fallback to env variable)
+        encoded = os.environ["GCP_SERVICE_ACCOUNT"]
+        decoded = base64.b64decode(encoded)
+        info = json.loads(decoded)
 
-    if os.path.exists(key_path):
-        credentials = service_account.Credentials.from_service_account_file(key_path)
-        project_id = project_id or credentials.project_id
-        st.sidebar.success("✅ Using local service account file.")
-    elif "gcp_service_account" in st.secrets:
-        credentials = service_account.Credentials.from_service_account_info(st.secrets["gcp_service_account"])
-        project_id = project_id or credentials.project_id
-        st.sidebar.success("✅ Using Streamlit Cloud secrets.")
-    else:
-        st.sidebar.error("❌ No GCP credentials found.")
-        st.stop()
-
-    return bigquery.Client(project=project_id, credentials=credentials), project_id
+    credentials = service_account.Credentials.from_service_account_info(info)
+    client = bigquery.Client(credentials=credentials, project=info["project_id"])
+    return client, info["project_id"]
 
 client, PROJECT_ID = get_bq_client()
 
@@ -93,8 +114,8 @@ with st.sidebar.expander("ℹ️ Tips"):
     )
 
 # -------------------------- TABS --------------------------
-tab_overview, tab_lines, tab_routes, tab_facilities, tab_predictions, tab_schedules, tab_shapes, tab_stops, tab_trips, tab_vehicles, tab_patterns, tab_alerts, tab_sql = st.tabs(
-    ["📊 Overview", "🧵 Lines", "🛤 Routes", "🏢 Facilities", "📈 Predictions", "🗓 Schedules", "🌀 Shapes", "🛑 Stops", "🚌 Trips", "🚗 Vehicles", "🗺 Patterns", "⚠ Alerts", "🧪 SQL Lab"]
+tab_overview, tab_lines, tab_routes, tab_facilities, tab_predictions, tab_schedules, tab_shapes, tab_stops, tab_trips, tab_vehicles, tab_patterns, tab_alerts,tab_delay, tab_sql = st.tabs(
+    ["📊 Overview", "🧵 Lines", "🛤 Routes", "🏢 Facilities", "📈 Predictions", "🗓 Schedules", "🌀 Shapes", "🛑 Stops", "🚌 Trips", "🚗 Vehicles", "🗺 Patterns", "⚠ Alerts", "⏱ Delay Analytics","🧪 SQL Lab"]
 )
 
 # -------------------------- OVERVIEW --------------------------
@@ -557,7 +578,335 @@ with tab_alerts:
     except Exception as e:
         st.error(f"alerts error: {e}")
 
+# import streamlit as st
+# import pandas as pd
+# import plotly.express as px
+# from google.cloud import bigquery
 
+# PROJECT_ID = "christina-ba882-fall25"
+
+# ===========================================================
+# ------------------ BIGQUERY TABLE LOADER -------------------
+# ===========================================================
+
+@st.cache_data(ttl=120)
+def load_table(table_name):
+    """Loads a BigQuery table and handles errors safely."""
+    try:
+        client = bigquery.Client()
+        query = f"SELECT * FROM `{PROJECT_ID}.mbta_core.{table_name}`"
+        df = client.query(query).to_dataframe()
+
+        if df.empty:
+            st.warning(f"⚠ Table loaded but EMPTY: {table_name}")
+
+        return df
+
+    except Exception as e:
+        st.error(f"❌ Failed to load `{table_name}`")
+        st.exception(e)
+        return pd.DataFrame()
+
+
+# ===========================================================
+# -------------------- LOAD DATASETS --------------------------
+# ===========================================================
+
+df_line  = load_table("mart_line_hour_delay")
+df_route = load_table("mart_route_day_delay")
+df_stop  = load_table("mart_stop_delay")
+
+st.caption(
+    f"Loaded → Lines: {len(df_line)}, Routes: {len(df_route)}, Stops: {len(df_stop)}"
+)
+
+
+# ===========================================================
+# --------------------------- TABS ----------------------------
+# ===========================================================
+
+# tab_overview, tab_lines, tab_routes, tab_facilities, tab_predictions, tab_schedules, tab_shapes, tab_stops, tab_trips, tab_vehicles, tab_patterns, tab_alerts, tab_delay, tab_sql = st.tabs(
+#     ["📊 Overview", "🧵 Lines", "🛤 Routes", "🏢 Facilities", "📈 Predictions", "🗓 Schedules", "🌀 Shapes", "🛑 Stops", "🚌 Trips", "🚗 Vehicles", "🗺 Patterns", "⚠ Alerts", "⏱ Delay Analytics", "🧪 SQL Lab"]
+# )
+
+
+# ===========================================================
+# ----------- ALL DELAY ANALYTICS GOES INSIDE tab_delay -------
+# ===========================================================
+
+with tab_delay:
+
+    st.header("⏱ Delay Analytics")
+    st.caption("Powered by curated delay marts in `mbta_core`")
+
+    level = st.radio(
+        "Choose Delay Analytics Level:",
+        ["Line", "Route", "Stop"],
+        horizontal=True
+    )
+
+    def clean_delay(x):
+        """Prevents unrealistic delays (e.g., -200,000 sec)."""
+        if pd.isna(x):
+            return 0
+        if x < -10000:
+            return 0
+        return x
+
+
+    # ===========================================================
+    # ---------------------- LINE LEVEL ---------------------------
+    # ===========================================================
+
+    if level == "Line":
+
+        st.subheader("🚇 Line-Level Delay Insights")
+
+        if df_line.empty:
+            st.warning("No line-level delay data available.")
+            st.stop()
+
+        df = df_line.copy()
+        df["delay_clean"] = df["avg_delay_seconds"].fillna(0)
+
+        df["line_name"] = df["line_id"].astype(str)
+
+        avg_delay = df["delay_clean"].mean()
+        worst_line = df.loc[df["delay_clean"].idxmin(), "line_name"]
+        total_lines = df["line_name"].nunique()
+
+        c2, c3 = st.columns(2)
+        # c1.metric("Avg Delay (sec)", f"{avg_delay:,.1f}")
+        c2.metric("Worst Line", worst_line)
+        c3.metric("Lines Measured", total_lines)
+
+        rank = (
+            df.groupby("line_name")["delay_clean"]
+            .mean()
+            .reset_index()
+            .sort_values("delay_clean")
+        )
+
+        fig = px.bar(rank, x="line_name", y="delay_clean",
+                     title="Lines Ranked by Average Delay")
+        st.plotly_chart(fig, use_container_width=True)
+
+        fig2 = px.scatter(df, x="n_predictions", y="delay_clean",
+                          color="line_name",
+                          title="Delay vs Prediction Volume")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        fig3 = px.box(df, x="line_name", y="delay_clean",
+                      title="Delay Distribution Across Lines")
+        st.plotly_chart(fig3, use_container_width=True)
+
+        st.success("Line-level delay analytics ready.")
+
+
+
+    # ===========================================================
+    # ---------------------- ROUTE LEVEL --------------------------
+    # ===========================================================
+    # ===========================================================
+# ---------------------- ROUTE LEVEL --------------------------
+# ===========================================================
+
+    if level == "Route":
+        st.subheader("🛤 Route-Level Delay Insights")
+
+        if df_route.empty:
+            st.warning("Route table is empty.")
+            st.stop()
+
+        df = df_route.copy()
+
+    # Clean delays
+        df["delay_clean"] = df["avg_delay_seconds"].apply(clean_delay)
+
+    # Use REAL readable names → line_id, NOT "True"
+        df["route_name"] = df["line_id"].fillna(df["route_id"].astype(str))
+
+    # --- Summary metrics ---
+        # avg_delay = df["delay_clean"].mean()
+        # worst_route = df.loc[df["delay_clean"].idxmin(), "route_name"]
+        # total_routes = df["route_name"].nunique()
+
+        # c1, c2, c3 = st.columns(3)
+        # c1.metric("Avg Delay (sec)", f"{avg_delay:,.1f}")
+        # c2.metric("Worst Route", worst_route)
+        # c3.metric("Routes Measured", total_routes)
+
+        # --- Summary metrics (MUCH more meaningful) ---
+
+        # Typical delays
+        median_delay = df["p50_delay_seconds"].median()          # typical rider delay
+        p90_delay = df["p90_delay_seconds"].median()              # severe delay level
+        pct_reliability = df["pct_trips_delayed_5min"].mean()     # avg % delayed >5min
+
+        # Worst route = the one with the highest median delay
+        worst_route = df.loc[df["p50_delay_seconds"].idxmax(), "route_name"]
+
+        # Count of unique routes
+        total_routes = df["route_name"].nunique()
+
+        # Display metrics
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Typical Delay (Median)", f"{median_delay:,.0f} sec")
+        c2.metric("Severe Delay (p90)", f"{p90_delay:,.0f} sec")
+        c3.metric("% Trips Delayed >5 min", f"{pct_reliability:.1%}")
+        c4.metric("Worst Route", worst_route)
+
+        # Second row for route count
+        st.metric("Routes Measured", total_routes)
+
+
+
+    # ===========================================================
+    # ⭐ SINGLE INSIGHTFUL PERFORMANCE CHART
+    # ===========================================================
+
+        st.markdown("### 📊 Reliability vs Delay Severity")
+
+        fig = px.scatter(
+            df,
+            x="p50_delay_seconds",         # median delay
+            y="pct_trips_delayed_5min",    # reliability
+            size="n_predictions",          # bubble size = impact
+            color="route_name",            # readable labels
+            hover_data={
+            "avg_delay_seconds": True,
+            "p50_delay_seconds": True,
+            "p90_delay_seconds": True,
+            "n_predictions": True,
+            "pct_trips_delayed_5min": True
+            },
+            title="Route Reliability vs Delay Severity",
+            )
+
+        fig.update_layout(
+        xaxis_title="Median Delay (p50) — seconds",
+        yaxis_title="% Trips Delayed > 5 min",
+        legend_title="Route",
+    )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.success("Route-level analytics ready.")
+
+    
+    # if level == "Route":
+    #     st.subheader("🛤 Route-Level Delay Insights")
+    #     if df_route.empty:
+    #         st.warning("Route table is empty.")
+    #         st.stop()
+    #     df = df_route.copy()
+        
+    #     # FIX: use actual column names
+    #     if "route_name" in df.columns:
+    #         df["route_name"] = df["route_name"].fillna(df["route_id"].astype(str))
+    #     else:
+    #         df["route_name"] = df["route_id"].astype(str)
+    #         df["delay_clean"] = df["avg_delay_seconds"].apply(clean_delay)
+    #     avg_delay = df["delay_clean"].mean()
+    #     worst_route = df.loc[df["delay_clean"].idxmin(), "route_name"]
+    #     total_routes = df["route_name"].nunique()
+        
+    #     c1, c2, c3 = st.columns(3)
+    #     c1.metric("Avg Delay (sec)", f"{avg_delay:,.1f}")
+    #     c2.metric("Worst Route", worst_route)
+    #     c3.metric("Routes Measured", total_routes)
+        
+    #     # Ranking
+    #     rank = (
+    #         df.groupby("route_name")["delay_clean"]
+    #       .mean()
+    #       .reset_index()
+    #       .sort_values("delay_clean")
+    # )
+
+    #     fig = px.bar(rank, x="route_name", y="delay_clean",
+    #              title="Routes Ranked by Average Delay")
+    #     st.plotly_chart(fig, use_container_width=True)
+
+    #     fig2 = px.scatter(df, x="n_predictions", y="delay_clean",
+    #                   color="route_name",
+    #                   title="Delay vs Number of Predictions")
+    #     st.plotly_chart(fig2, use_container_width=True)
+
+    #     fig3 = px.box(df, x="route_name", y="delay_clean",
+    #               title="Delay Distribution per Route")
+    #     st.plotly_chart(fig3, use_container_width=True)
+
+    #     st.success("Route-level analytics ready.")
+
+
+
+
+    # ===========================================================
+    # ----------------------- STOP LEVEL --------------------------
+    # ===========================================================
+
+    if level == "Stop":
+
+        st.subheader("🚏 Stop-Level Delay Insights")
+
+        if df_stop.empty:
+            st.warning("No stop-level delay data available.")
+            st.stop()
+
+        df = df_stop.copy()
+        df["delay_clean"] = df["avg_delay_seconds"].fillna(0)
+
+        df["stop_label"] = df["stop_name"] + " (ID " + df["stop_id"].astype(str) + ")"
+
+        avg_delay = df["delay_clean"].mean()
+        pct_delayed = df["pct_delayed_5min"].mean()
+
+        (c2,) = st.columns(1)
+        # c1.metric("Avg Network Delay", f"{avg_delay:,.1f} sec")
+        c2.metric("Avg % Delayed >5 min", f"{pct_delayed:.1%}")
+
+        rank = (
+            df.groupby(["stop_id", "stop_name"])["delay_clean"]
+            .mean()
+            .reset_index()
+            .sort_values("delay_clean")
+        )
+
+        fig = px.bar(rank.head(25), x="stop_name", y="delay_clean",
+                     title="Stops Ranked by Average Delay (Top 25)")
+        st.plotly_chart(fig, use_container_width=True)
+
+        pct_rank = (
+            df.groupby(["stop_id", "stop_name"])["pct_delayed_5min"]
+            .mean()
+            .reset_index()
+            .sort_values("pct_delayed_5min", ascending=False)
+        )
+
+        fig2 = px.bar(pct_rank.head(25), x="stop_name", y="pct_delayed_5min",
+                      title="% Trips Delayed >5 min (Top 25 Stops)")
+        fig2.update_layout(yaxis_tickformat=".0%")
+        st.plotly_chart(fig2, use_container_width=True)
+
+        stop_options = df[["stop_id", "stop_name"]].drop_duplicates()
+        stop_options["label"] = stop_options["stop_name"] + " (ID " + stop_options["stop_id"].astype(str) + ")"
+
+        selected_label = st.selectbox("Choose Stop:", stop_options["label"])
+        selected_id = stop_options.loc[
+            stop_options["label"] == selected_label, "stop_id"
+        ].iloc[0]
+
+        stop_df = df[df["stop_id"] == selected_id]
+
+        # fig3 = px.box(stop_df, y="delay_clean",
+        #               title=f"Delay Distribution for Stop {selected_label}")
+        # st.plotly_chart(fig3, use_container_width=True)
+
+        st.subheader("Raw Data Preview")
+        st.dataframe(stop_df, use_container_width=True)
+
+        st.success("Stop-level delay analytics ready.")
 
 
 # -------------------------- SQL LAB --------------------------
@@ -577,3 +926,130 @@ with tab_sql:
             st.error(str(e))
 
 st.success("✅ Dashboard Ready")
+
+# # ===========================================================
+# # 🤖 NEW TAB: ML Delay Predictor + AI Assistant
+# # ===========================================================
+# # ===========================================================
+# # 🤖 NEW TAB: ML Delay Predictor + AI Assistant
+# # ===========================================================
+# with tab_ml:
+
+#     st.header("🤖 ML Delay Predictor & AI Assistant")
+#     st.caption("Uses your trained ML model stored in GCS + Vertex AI for natural queries.")
+
+#     # ---------------- LOAD MODEL FROM GCS ----------------
+#     @st.cache_resource
+#     def load_delay_model():
+#         from google.cloud import storage
+#         import joblib
+#         from io import BytesIO
+
+#         bucket_name = "ba882-team10-bucket"
+#         model_path = "models/mbta_delay_model.pkl"
+
+#         client = storage.Client()
+#         bucket = client.bucket(bucket_name)
+#         blob = bucket.blob(model_path)
+
+#         # Download raw bytes
+#         model_bytes = blob.download_as_bytes()
+
+#         # Load using joblib (correct for joblib-saved pkl)
+#         model = joblib.load(BytesIO(model_bytes))
+#         return model
+
+#     with st.spinner("Loading ML delay model from GCS..."):
+#         delay_model = load_delay_model()
+
+#     st.success("Delay model loaded successfully ✔️")
+
+#     # ---------------- STRUCTURED PREDICTION UI ----------------
+#     st.subheader("📈 Predict Delay (Structured Inputs)")
+
+#     if "route_name" not in df_route.columns:
+#         st.error("df_route must contain 'route_name' column.")
+#     else:
+#         routes = sorted(df_route["route_name"].dropna().unique())
+
+#         route_sel = st.selectbox("Choose Route:", routes)
+#         hour_sel = st.slider("Hour of Day (0–23):", 0, 23, 8)
+#         day_sel = st.selectbox(
+#             "Day of Week:", 
+#             ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+#         )
+
+#         # Encoders — MUST match how model was trained
+#         day_map = {"Mon":0, "Tue":1, "Wed":2, "Thu":3, "Fri":4, "Sat":5, "Sun":6}
+#         route_map = {r: i for i, r in enumerate(routes)}
+
+#         if st.button("🔮 Predict Delay"):
+#             try:
+#                 features = np.array([
+#                     [hour_sel, day_map[day_sel], route_map[route_sel]]
+#                 ])
+#                 prediction = delay_model.predict(features)[0]
+#                 st.metric("Predicted Delay (seconds)", f"{prediction:.2f}")
+#             except Exception as e:
+#                 st.error(f"Prediction failed: {e}")
+
+#     # ---------------- AI NATURAL LANGUAGE QUERY ----------------
+#     st.subheader("💬 Ask AI About Delays")
+
+#     from vertexai.preview.generative_models import GenerativeModel
+
+#     user_q = st.text_input(
+#         "Ask something like 'predict delay for Red Line at 6pm on Friday'"
+#     )
+
+#     if user_q:
+#         system_msg = """
+#         Extract route (string), hour (0-23 integer), and weekday (Mon–Sun)
+#         from the user's question about MBTA delays.
+        
+#         Output ONLY valid JSON like:
+#         {"route": "Red Line", "hour": 17, "day": "Fri"}
+
+#         If something is missing, guess reasonable defaults.
+#         Never output extra text.
+#         """
+
+#         llm = GenerativeModel(
+#             "gemini-2.5-flash",
+#             system_instruction=system_msg
+#         )
+
+#         try:
+#             raw = llm.generate_content(user_q).text
+
+#             # Try reading JSON safely
+#             try:
+#                 params = json.loads(raw)
+#             except:
+#                 st.error("The AI did not return valid JSON.")
+#                 st.write("AI output:", raw)
+#                 st.stop()
+
+#             # Extract fields with safe defaults
+#             route = params.get("route", routes[0])
+#             hour = int(params.get("hour", 12))
+#             day = params.get("day", "Mon")
+
+#             # Fix route if AI output is not exact match
+#             if route not in route_map:
+#                 # Try fuzzy matching or fallback to first
+#                 route = routes[0]
+
+#             # Prepare model features
+#             features = np.array([
+#                 [hour, day_map.get(day, 0), route_map[route]]
+#             ])
+#             pred = delay_model.predict(features)[0]
+
+#             st.write("### 🤖 Estimated Delay")
+#             st.success(f"{route} on {day} at {hour}:00 → **{pred:.2f} sec delay**")
+
+#         except Exception as e:
+#             st.error(f"AI Query Error: {e}")
+
+

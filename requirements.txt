@@ -5,3 +5,8 @@ requests
 pyarrow
 streamlit
 google-cloud-bigquery
+db-dtypes
+plotly
+google-generativeai
+google-cloud-aiplatform
+scikit-learn==1.3.2
