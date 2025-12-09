@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import os
 from datetime import timedelta
 
 import pendulum
 from airflow.decorators import dag, task
-
-# If you prefer PythonOperator, you can import it too
-# from airflow.operators.python import PythonOperator
 
 from include.train_delay_model import train_and_upload
 
@@ -19,7 +15,7 @@ TIMEZONE = "America/New_York"
 @dag(
     dag_id="mbta_train_delay_model",
     start_date=pendulum.datetime(2025, 11, 1, tz=TIMEZONE),
-    schedule="@daily",   # or None, and you trigger manually
+    schedule="@daily",   # or None if you want to trigger manually
     catchup=False,
     max_active_runs=1,
     default_args={
@@ -37,6 +33,7 @@ def mbta_train_delay_model():
 
     @task
     def run_training():
+        # This calls into include/train_delay_model.py
         train_and_upload()
 
     run_training()
